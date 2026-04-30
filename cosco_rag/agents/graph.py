@@ -12,6 +12,7 @@ from langsmith import traceable
 from cosco_rag import config
 from cosco_rag.tools import tools
 from cosco_rag.knowledge.milvus_client import search_sensitive_goods
+from cosco_rag.utils.logger import get_logger
 
 # 工具名称到函数的映射
 tool_map = {t.name: t for t in tools}
@@ -28,6 +29,8 @@ llm_with_tools = config.base_llm.bind_tools(tools_list)  # 关键：创建绑定
 
 import re
 from typing import List, Dict, Any
+
+logger = get_logger("agent_node")
 
 @traceable
 def parse_tool_calls_from_ai_content(content: str) -> List[Dict[str, Any]]:
@@ -86,6 +89,7 @@ def parse_tool_calls_from_ai_content(content: str) -> List[Dict[str, Any]]:
 
     return tool_calls
 
+
 @traceable
 def agent_node(state: AgentState):
     tool_descriptions = """
@@ -121,6 +125,8 @@ def agent_node(state: AgentState):
     # 构建消息列表
     messages = [SystemMessage(content=sys_msg)] + state["messages"]
     response = llm_with_tools.invoke(messages)
+    thread_id = state.get("config", {}).get("configurable", {}).get("thread_id", "unknown")
+    logger.bind(thread_id=thread_id).info(f"Agent node input messages count: {len(state['messages'])}")
     return {"messages": [AIMessage(content=response.content,tool_calls=response.tool_calls)]}
 
 

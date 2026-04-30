@@ -33,7 +33,7 @@
             });
             eventSource.addEventListener('end', (e) => {
                 const data = JSON.parse(e.data);
-                document.getElementById('output').innerHTML += `✅ ${data.message}\n`;
+<!--                document.getElementById('output').innerHTML += `✅ ${data.message}\n`;-->
                 eventSource.close();
             });
             eventSource.addEventListener('error', (e) => {
