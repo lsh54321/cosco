@@ -1,0 +1,74 @@
+👤 用户: 帮我订一个40HQ柜子，从上海到洛杉矶，品名是玩具，HS编码950300，毛重500公斤，发货人宁波XX公司，收货人ABC公司
+
+🟢 Agent: 订舱成功，订舱号为COSU0D03168A9F，S/O号为SO03168A9F。请确认是否需要进一步操作。
+
+
+
+👤 用户: 需要进一步处理
+
+🟢 Agent: S/O状态已查询，当前状态为“RELEASED”，最后更新时间为2026-04-28 22:49:42。请确认是否需要进行下一步操作。
+
+
+
+👤 用户: 需要进一步处理
+
+🟢 Agent: VGM截止时间为2026-04-30T10:51:38.093271。请确认是否需要进行下一步操作
+
+
+
+👤 用户: 提交提单草稿，订舱号COSU0D03168A9F，草稿内容{"shipper": "宁波XX进出口有限公司","consignee": "ABC TRADING LLC","notify_party": "同收货人","goods_name": "锂离子电池组","hs_code": "85076000","weight_kg": 1520.5,"volume_cbm": 2.8,"container_type": "40HQ","container_no": "COSU12345678","seal_no": "COS123456","port_of_loading": "上海港 (CNSHA)","destination": "洛杉矶港 (USLAX)","vessel_voyage": "COSCO SHIPPING 012W","etd": "2025-05-10","eta": "2025-06-05","special_requirements": "MSDS + UN38.3报告","remarks": "危险品9类，需提供危包证"}
+
+🟢 Agent: 提单草稿已提交，任务ID为BL_COSU0D03168A9F。请等待人工审核。
+
+
+
+⏸️ 等待人工审核...
+请输入审核结果 (approved/rejected 及原因): approved
+✅ 人工审核通过，订舱流程继续。
+
+
+
+👤 用户: 订舱号COSU0D03168A9F的VGM截止时间是什么
+
+🟢 Agent: 订舱号COSU0D03168A9F的VGM截止时间是2026-04-30T11:13:28.686554。
+
+
+
+👤 用户: 追踪箱号COSU12345678的集装箱
+
+🟢 Agent: 箱号COSU12345678的集装箱状态如下：
+- 码头出港（Gate Out）
+
+- 船舶已装船（Loaded on Vessel）
+
+- 已启航（Sailed）
+
+
+
+
+🟢 Agent: 已收到集装箱动态信息，追踪结果如下：
+
+- **事件1**：Gate Out（装船前已出港）
+
+- **事件2**：Loaded on Vessel（已装船）
+
+- **事件3**：Sailed（已启航）
+
+  
+
+👤 用户: 舱位查询，上海到洛杉矶，40HQ
+🟢 Agent: 舱位查询结果如下：
+
+- 舱位可用
+
+- 剩余空间：10个
+
+- 航次：COSCO SHIPPING 012W
+
+- 船期：2026年05月05日（预计启航）
+
+  
+
+👤 用户:  查询天气
+🟢 Agent: 我无法查询天气信息，您可能需要通过其他方式获取天气数据，例如使用天气预报网站或相关应用。
+

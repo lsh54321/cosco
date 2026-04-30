@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>订舱 Agent 测试</title>
+</head>
+<body>
+    <div>
+        <input type="text" id="threadId" value="test001" placeholder="Thread ID">
+        <input type="text" id="userInput" placeholder="输入消息" style="width:400px">
+        <button onclick="sendMessage()">发送</button>
+        <button onclick="resumeApproved()">审核通过</button>
+        <button onclick="resumeRejected()">审核驳回</button>
+    </div>
+    <pre id="output" style="background:#f0f0f0; padding:10px; margin-top:20px;"></pre>
+
+    <script>
+        let eventSource = null;
+
+        function connect(threadId, message, resumeValue) {
+            if (eventSource) eventSource.close();
+            const url = `/chat/stream?thread_id=${threadId}&message=${encodeURIComponent(message)}&resume_value=${resumeValue || ''}`;
+            eventSource = new EventSource(url);
+            eventSource.addEventListener('agent', (e) => {
+                const data = JSON.parse(e.data);
+                document.getElementById('output').innerHTML += `🤖 Agent: ${data.content}\n`;
+            });
+            eventSource.addEventListener('interrupt', (e) => {
+                const data = JSON.parse(e.data);
+                document.getElementById('output').innerHTML += `⏸️ ${data.message}\n详情: ${JSON.stringify(data.detail)}\n`;
+                eventSource.close();
+            });
+            eventSource.addEventListener('end', (e) => {
+                const data = JSON.parse(e.data);
+                document.getElementById('output').innerHTML += `✅ ${data.message}\n`;
+                eventSource.close();
+            });
+            eventSource.addEventListener('error', (e) => {
+                document.getElementById('output').innerHTML += `❌ 错误: ${e.data}\n`;
+                eventSource.close();
+            });
+        }
+
+        function sendMessage() {
+            const threadId = document.getElementById('threadId').value;
+            const message = document.getElementById('userInput').value;
+            if (!threadId || !message) return;
+            connect(threadId, message, null);
+        }
+
+        function resumeApproved() {
+    const threadId = document.getElementById('threadId').value;
+    if (eventSource) eventSource.close();
+    connect(threadId, '', 'approved');
+}
+
+        function resumeRejected() {
+            const threadId = document.getElementById('threadId').value;
+            const reason = prompt('请输入驳回原因');
+            if (reason) {
+                fetch(`/chat/resume?thread_id=${threadId}&feedback=rejected:${reason}`, {method: 'POST'})
+                    .then(res => {
+                        if (res.ok) connect(threadId, '', 'rejected:' + reason);
+                        else alert('恢复失败');
+                    });
+            }
+        }
+    </script>
+</body>
+</html>
