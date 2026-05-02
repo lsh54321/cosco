@@ -17,7 +17,11 @@ def run_multi_turn():
         "booking_info": {},
         "human_approval_needed": False,
         "human_feedback": "",
-        "sensitive_check": {}
+        "sensitive_check": {},
+        # 新增字段
+        "intent": "",
+        "next_agent": "",
+        "active_agent": ""
     }
 
     while True:
@@ -40,6 +44,11 @@ def run_multi_turn():
                     for msg in event["agent"]["messages"]:
                         if hasattr(msg, "content") and msg.content:
                             print(f"🟢 Agent: {msg.content}")
+                for node_name, node_output in event.items():
+                    if node_name in ["query_agent", "booking_agent", "compliance_agent", "notify_agent", "document_agent"] and "messages" in node_output:
+                        for msg in event[node_name]["messages"]:
+                            if hasattr(msg, "content") and msg.content:
+                                print(f"🟢 Agent: {msg.content}")
                 if "__interrupt__" in event:
                     print("\n⏸️ 等待人工审核...")
                     fb = input("请输入审核结果 (approved/rejected 及原因): ")

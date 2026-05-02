@@ -7,7 +7,7 @@ from langsmith.middleware import TracingMiddleware
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
 from starlette.staticfiles import StaticFiles
-
+from langchain_core.messages import HumanMessage
 # 导入之前定义的 Agent 创建函数（假设在 agents/graph.py 中）
 from cosco_rag.agents.graph import create_agent
 
@@ -64,7 +64,11 @@ async def event_generator(thread_id: str, user_message: str, resume_value: str =
                 "booking_info": {},
                 "human_approval_needed": False,
                 "human_feedback": "",
-                "sensitive_check": {}
+                "sensitive_check": {},
+                # 新增字段
+                "intent": "",
+                "next_agent": "",
+                "active_agent": ""
             },
             "interrupted": False,
             "interrupt_data": None
@@ -80,7 +84,7 @@ async def event_generator(thread_id: str, user_message: str, resume_value: str =
         events = app_graph.stream(Command(resume=resume_value), session_config)
     else:
         # 添加用户消息到状态
-        from langchain_core.messages import HumanMessage
+
         state["messages"].append(HumanMessage(content=user_message))
         events = app_graph.stream(state, session_config)
 
@@ -120,6 +124,16 @@ async def event_generator(thread_id: str, user_message: str, resume_value: str =
             elif "human_review" in event:
                 # 如果人工审核节点输出了消息（理论上已经进入中断，但以防万一）
                 pass
+            for node_name, node_output in event.items():
+                if node_name in ["query_agent", "booking_agent", "compliance_agent", "notify_agent",
+                                 "document_agent"] and "messages" in node_output:
+                    for msg in event[node_name]["messages"]:
+                        if hasattr(msg, "content") and msg.content:
+                            print(f"🟢 Agent: {msg.content}")
+                            yield {
+                                "event": "agent",
+                                "data": json.dumps({"content": msg.content}, ensure_ascii=False)
+                            }
 
         # 流正常结束
         yield {"event": "end", "data": json.dumps({"message": "订舱流程结束"})}

@@ -1,10 +1,9 @@
 import json
 import re
-from typing import TypedDict, Annotated, List, Literal
+from typing import TypedDict, Annotated, List, Literal, Dict, Any
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt, Command
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, SystemMessage
 from langsmith import traceable
@@ -14,63 +13,46 @@ from cosco_rag.tools import tools
 from cosco_rag.knowledge.milvus_client import search_sensitive_goods
 from cosco_rag.utils.logger import get_logger
 
-# 工具名称到函数的映射
+logger = get_logger("multi_agent_graph")
+
+# ==================== 工具映射 ====================
 tool_map = {t.name: t for t in tools}
-tool_node = ToolNode(tools)   # 自动处理 tool_calls
+
+
+# ==================== 状态定义（增加多 Agent 字段） ====================
 class AgentState(TypedDict):
     messages: Annotated[List, add_messages]
     booking_info: dict
     human_approval_needed: bool
     human_feedback: str
     sensitive_check: dict
-tool_executor = ToolNode(tools)
-tools_list = tools  # 确保 tools 是你的工具列表
-llm_with_tools = config.base_llm.bind_tools(tools_list)  # 关键：创建绑定工具的新实例
+    # 多 Agent 新增字段
+    intent: str  # 识别出的意图
+    next_agent: str  # Supervisor 选择的下一个 Agent
+    active_agent: str  # 当前正在执行的 Agent 名称
 
-import re
-from typing import List, Dict, Any
 
-logger = get_logger("agent_node")
-
-@traceable
+# ==================== 原有辅助函数（解析工具调用） ====================
 def parse_tool_calls_from_ai_content(content: str) -> List[Dict[str, Any]]:
-    """
-    从AI回复中解析出工具调用。
-    支持格式：
-        query_space(port_of_loading="上海", destination="洛杉矶", container_type="40HQ")
-    或
-        submit_booking(shipper="宁波XX公司", consignee="ABC公司", goods_name="玩具", hs_code="950300", weight_kg=500, container_type="40HQ", port_of_loading="上海", destination="洛杉矶")
-
-    返回列表，每个元素为 {"name": 工具名, "args": {参数名: 参数值}}
-    如果解析出的参数值包含占位符（如"全称"、"名称"、"编码"、"公斤"、"负责"、"待定"、"unknown"等），则视为无效调用，返回空列表。
-    """
-    # 匹配类似 "工具名(参数=值, 参数2=值2)" 的模式，支持跨行
-    # 注意：参数值可以是双引号字符串、单引号字符串、无引号数字或布尔值
+    """（原函数，不变）"""
     pattern = r'(\w+)\(([^)]+)\)'
     matches = re.findall(pattern, content, re.DOTALL)
-
     tool_calls = []
     invalid_placeholders = ["全称", "名称", "编码", "公斤", "负责", "待定", "unknown", "请提供", "输入", "?"]
-
     for tool_name, args_str in matches:
-        # 解析参数字符串: key=value, key2=value2
         args = {}
-        # 匹配 key=value, 支持值带引号或不带引号
         arg_pattern = r'(\w+)=("([^"]*)"|\'([^\']*)\'|([^,)]+))'
         for match in re.finditer(arg_pattern, args_str):
             key = match.group(1)
-            # 值可能是 group 3 (双引号), group4 (单引号), group5 (无引号)
             value = match.group(3) or match.group(4) or match.group(5)
             if value is not None:
                 value = value.strip()
-                # 尝试转换为数字
                 if value.isdigit():
                     value = int(value)
                 elif value.replace('.', '', 1).isdigit():
                     value = float(value)
                 args[key] = value
-
-        # 检查参数值是否包含占位符
+        # 占位符检测
         has_placeholder = False
         for val in args.values():
             if isinstance(val, str):
@@ -80,108 +62,132 @@ def parse_tool_calls_from_ai_content(content: str) -> List[Dict[str, Any]]:
                         break
             if has_placeholder:
                 break
-
         if has_placeholder:
-            # 无效调用，直接返回空列表（表示没有有效工具调用）
             return []
-
         tool_calls.append({"name": tool_name, "args": args})
-
     return tool_calls
 
 
-@traceable
-def agent_node(state: AgentState):
-    tool_descriptions = """
-- query_space: 舱位查询。必需参数：port_of_loading（起运港）, destination（目的港）, container_type（箱型，如20GP/40HQ）。
-- submit_booking: 提交订舱。必需参数：shipper（发货人）, consignee（收货人）, goods_name（品名）, hs_code（HS编码）, weight_kg（毛重公斤）, container_type（箱型）, port_of_loading（起运港）, destination（目的港）。
-- get_so_status: 查询S/O状态。必需参数：so_no（S/O号）。
-- get_vgm_deadline: 查询VGM截止时间。必需参数：booking_no（订舱号）。
-- submit_bl_draft: 提交提单确认件。必需参数：booking_no（订舱号）, bl_draft_json必须根据 booking_info 中的订舱信息自动生成 JSON 格式的提单草稿作为参数。
-- track_container: 集装箱追踪。必需参数：container_no（箱号）。
-"""
-    sys_msg = f"""你是一个中远海运订舱助手。你有以下工具可用：
-{tool_descriptions}
+# ==================== 工厂函数：创建受限子 Agent ====================
+def create_sub_agent_node(agent_name: str, allowed_tools: List[str], system_extra: str = ""):
+    """
+    返回一个子 Agent 节点函数，该节点只允许使用指定的工具列表。
+    """
+    # 构建允许的工具描述
+    allowed_tools_set = set(allowed_tools)
+    filtered_tools = [t for t in tools if t.name in allowed_tools_set]
+    tool_descriptions = "\n".join([f"- {t.name}: {t.description}" for t in filtered_tools])
 
+    sys_prompt = f"""你是中远海运订舱助手的【{agent_name}】模块。
+你可以使用以下工具：
+{tool_descriptions}
+{system_extra}
+**严格指令**：
+- **禁止输出任何解释、推理或过渡语句**（例如“我需要查询”、“为了获取信息”等）。
+- 如果用户请求查询信息，直接调用相应工具并输出工具返回的原始结果，不要添加任何额外文字。
+- 如果工具已经返回结果，将结果原样输出，不要加前缀或说明。
 **核心指令**：
 1. 当用户提供了某个工具所需的所有必需参数时，你必须**立即输出该工具调用**，格式为：工具名(参数1="值1", 参数2="值2", ...)
-   - 数字参数可以不加引号，例如 weight_kg=500。
-   - 不要输出任何其他解释或自然语言。
 2. 如果用户提供的参数不完整，用自然语言追问缺少的参数，不要输出工具调用。
-3. 一次只能调用一个工具。先判断用户意图最匹配哪个工具。
+3. 一次只能调用一个工具。
 
-**示例**：
-- 用户：查一下上海到洛杉矶的40HQ舱位
-  助手：query_space(port_of_loading="上海", destination="洛杉矶", container_type="40HQ")
-- 用户：帮我订一个40HQ柜子，从上海到洛杉矶，品名玩具，HS编码950300，毛重500公斤，发货人宁波XX公司，收货人ABC公司
-  助手：submit_booking(shipper="宁波XX公司", consignee="ABC公司", goods_name="玩具", hs_code="950300", weight_kg=500, container_type="40HQ", port_of_loading="上海", destination="洛杉矶")
-- 用户：查一下SO12345678的状态
-  助手：get_so_status(so_no="SO12345678")
-- 用户：订舱号COSU12345678的VGM截止时间
-  助手：get_vgm_deadline(booking_no="COSU12345678")
-    现在，用户请求：{state['messages'][-1].content}
-    请直接输出上述格式，不要有其他内容。
+现在，用户请求：{{user_query}}
+请直接输出。
 """
-    # 构建消息列表
-    messages = [SystemMessage(content=sys_msg)] + state["messages"]
-    response = llm_with_tools.invoke(messages)
-    thread_id = state.get("config", {}).get("configurable", {}).get("thread_id", "unknown")
-    logger.bind(thread_id=thread_id).info(f"Agent node input messages count: {len(state['messages'])}")
-    return {"messages": [AIMessage(content=response.content,tool_calls=response.tool_calls)]}
+
+    @traceable
+    def sub_agent_node(state: AgentState):
+        user_query = state['messages'][-1].content
+        messages = [SystemMessage(content=sys_prompt.format(user_query=user_query))] + state["messages"]
+        # 绑定允许的工具
+        try:
+            llm_with_tools = config.base_llm.bind_tools(filtered_tools)
+            response = llm_with_tools.invoke(messages)
+        except Exception as e:
+            import traceback
+            error_trace = traceback.format_exc()
+            logger.error(f"子Agent {agent_name} 执行失败:\n{error_trace}")
+            # 尝试从 e 中提取有用信息
+            error_type = type(e).__name__
+            error_msg_text = str(e)
+            user_friendly = f"❌ {agent_name} 服务暂时不可用（{error_type}）。请检查 Ollama/Milvus 是否运行。详细信息：{error_msg_text[:200]}"
+            return {"messages": [AIMessage(content=user_friendly)], "active_agent": agent_name}
+        return {"messages": [AIMessage(content=response.content, tool_calls=response.tool_calls)],
+                "active_agent": agent_name}
+
+    return sub_agent_node
 
 
-# agents/graph.py 或 agents/tool_node.py
-@traceable
-def tool_node(state: AgentState):
-    """执行工具并更新状态"""
-    last_msg = state["messages"][-1]
-    tool_calls = last_msg.tool_calls
-    new_booking_info = state.get("booking_info", {}).copy()
-    results = []
+# 定义 5 个子 Agent
+query_agent_node = create_sub_agent_node(
+    "query_agent",
+    ["query_space", "get_so_status", "track_container", "get_vgm_deadline"],
+    system_extra="注意：你负责舱位、状态、集装箱、VGM 截止时间等查询类任务。"
+)
+booking_agent_node = create_sub_agent_node(
+    "booking_agent",
+    ["query_space", "submit_booking", "submit_bl_draft", "get_so_status"],
+    system_extra="你负责提交订舱和提单确认件。如果缺少参数，请追问。"
+)
+compliance_agent_node = create_sub_agent_node(
+    "compliance_agent",
+    [],  # 合规 Agent 不直接调用工具，而是触发 sensitive_check_node
+    system_extra="你负责检查敏感品名和合规要求。如果用户提到敏感品名，请告知需要提供的文件。无需调用工具，直接用自然语言回答。"
+)
+notify_agent_node = create_sub_agent_node(
+    "notify_agent",
+    [],
+    system_extra="你负责发送通知、创建待办、提醒用户。直接给出友好的回复。"
+)
+document_agent_node = create_sub_agent_node(
+    "document_agent",
+    [],
+    system_extra="你负责解释文档处理流程。实际上文档解析在系统后台自动完成，回答用户关于托书、图片上传等问题。"
+)
 
-    for tc in tool_calls:
-        tool_name = tc["name"]
-        tool_args = tc["args"]
 
-        # ========== 关键：针对 submit_bl_draft 补全参数 ==========
-        if tool_name == "submit_bl_draft":
-            # 检查是否缺少 bl_draft_json
-            if "bl_draft_json" not in tool_args or not tool_args["bl_draft_json"]:
-                # 从 state["booking_info"] 中构造提单草稿
-                bl_draft_data = {
-                    "shipper": new_booking_info.get("shipper", ""),
-                    "consignee": new_booking_info.get("consignee", ""),
-                    "goods_name": new_booking_info.get("goods_name", ""),
-                    "hs_code": new_booking_info.get("hs_code", ""),
-                    "weight_kg": new_booking_info.get("weight_kg", ""),
-                    "container_type": new_booking_info.get("container_type", ""),
-                    "port_of_loading": new_booking_info.get("port_of_loading", ""),
-                    "destination": new_booking_info.get("destination", ""),
-                    "booking_no": tool_args.get("booking_no", new_booking_info.get("booking_no"))
-                }
-                tool_args["bl_draft_json"] = json.dumps(bl_draft_data)
+# ==================== Supervisor 节点 ====================
+def supervisor_node(state: AgentState) -> Dict[str, Any]:
+    """根据用户最新消息判断意图，选择对应的子 Agent"""
+    last_msg = state["messages"][-1].content.lower()
+    # 简单的关键词规则（可扩展为 LLM 分类）
+    if any(kw in last_msg for kw in ["舱位", "查询", "查一下", "s/o", "so", "集装箱", "追踪", "vgm", "截止"]):
+        intent = "query"
+        next_agent = "query_agent"
+    elif any(kw in last_msg for kw in ["订舱", "订一个", "订柜子", "提交订舱", "下单", "提单"]):
+        intent = "booking"
+        next_agent = "booking_agent"
+    elif any(kw in last_msg for kw in ["敏感", "合规", "危险品", "msds", "un38.3", "文件"]):
+        intent = "compliance"
+        next_agent = "compliance_agent"
+    elif any(kw in last_msg for kw in ["通知", "提醒", "待办", "邮件"]):
+        intent = "notify"
+        next_agent = "notify_agent"
+    elif any(kw in last_msg for kw in ["图片", "托书", "上传", "解析"]):
+        intent = "document"
+        next_agent = "document_agent"
+    else:
+        # 默认交给订舱 Agent
+        intent = "booking"
+        next_agent = "booking_agent"
 
-        # 执行工具
-        tool_func = tool_map[tool_name]
-        raw_result = tool_func.invoke(tool_args)
-        result_data = json.loads(raw_result)
-        results.append(ToolMessage(content=raw_result, tool_call_id=tc["id"]))
+    logger.info(f"Supervisor -> intent: {intent}, next_agent: {next_agent}")
+    return {"intent": intent, "next_agent": next_agent, "active_agent": next_agent}
 
-        # 更新 booking_info（订舱成功时）
-        if tool_name == "submit_booking" and result_data.get("success"):
-            new_booking_info["booking_no"] = result_data["booking_no"]
-            new_booking_info["so_no"] = result_data["so_no"]
-            new_booking_info.update(tool_args)
 
-    return {"messages": results, "booking_info": new_booking_info}
-
+# ==================== 原有节点（敏感检测、人工审核、工具执行） ====================
 @traceable
 def sensitive_check_node(state: AgentState):
-    """RAG 敏感品名检测（非工具调用，直接检索）"""
-    # 如果从消息中提取了 goods_name，可以存入 booking_info
+    """RAG 敏感品名检测（原函数，不变）"""
     goods = state.get("booking_info", {}).get("goods_name", "")
-    if not goods and state["messages"] and state["messages"][1] and state["messages"][1].tool_calls and state["messages"][1].tool_calls[0]["args"].get("goods_name"):
-        goods = state["messages"][1].tool_calls[0]["args"]["goods_name"]  # 示例
+    if not goods and len(state["messages"]) > 1:
+        # 尝试从上一个 AIMessage 的 tool_calls 中提取
+        prev_msg = state["messages"][-2] if len(state["messages"]) >= 2 else None
+        if prev_msg and hasattr(prev_msg, "tool_calls") and prev_msg.tool_calls:
+            for tc in prev_msg.tool_calls:
+                if "goods_name" in tc.get("args", {}):
+                    goods = tc["args"]["goods_name"]
+                    break
     if not goods:
         return {"sensitive_check": {"is_sensitive": False}}
     res = search_sensitive_goods(goods)
@@ -190,9 +196,10 @@ def sensitive_check_node(state: AgentState):
         return {"messages": [warn], "sensitive_check": res}
     return {"sensitive_check": res}
 
+
 @traceable
 def human_review_node(state: AgentState):
-    """人工审核节点（interrupt）"""
+    """人工审核节点（原函数，不变）"""
     data = {
         "question": "请审核以下提单草稿，输入 'approved' 或 'rejected' 及原因。",
         "bl_draft": state["booking_info"].get("bl_draft", {}),
@@ -205,67 +212,125 @@ def human_review_node(state: AgentState):
     else:
         return {"messages": [AIMessage(content=f"❌ 驳回，原因：{fb}。流程终止。")]}
 
+
 @traceable
-def route_after_agent(state: AgentState) -> Literal["tools", "human_review", "end"]:
+def tool_node_with_state_update(state: AgentState):
+    """执行工具并更新 booking_info（原函数，仅微调）"""
+    last_msg = state["messages"][-1]
+    tool_calls = last_msg.tool_calls
+    new_booking_info = state.get("booking_info", {}).copy()
+    results = []
+    for tc in tool_calls:
+        tool_name = tc["name"]
+        tool_args = tc["args"]
+        # 特殊处理 submit_bl_draft 参数补全
+        if tool_name == "submit_bl_draft":
+            if "bl_draft_json" not in tool_args or not tool_args["bl_draft_json"]:
+                bl_draft_data = {
+                    "shipper": new_booking_info.get("shipper", ""),
+                    "consignee": new_booking_info.get("consignee", ""),
+                    "goods_name": new_booking_info.get("goods_name", ""),
+                    "hs_code": new_booking_info.get("hs_code", ""),
+                    "weight_kg": new_booking_info.get("weight_kg", ""),
+                    "container_type": new_booking_info.get("container_type", ""),
+                    "port_of_loading": new_booking_info.get("port_of_loading", ""),
+                    "destination": new_booking_info.get("destination", ""),
+                    "booking_no": tool_args.get("booking_no", new_booking_info.get("booking_no"))
+                }
+                tool_args["bl_draft_json"] = json.dumps(bl_draft_data)
+        tool_func = tool_map[tool_name]
+        raw_result = tool_func.invoke(tool_args)
+        result_data = json.loads(raw_result)
+        results.append(ToolMessage(content=raw_result, tool_call_id=tc["id"]))
+        if tool_name == "submit_booking" and result_data.get("success"):
+            new_booking_info["booking_no"] = result_data["booking_no"]
+            new_booking_info["so_no"] = result_data["so_no"]
+            new_booking_info.update(tool_args)
+    return {"messages": results, "booking_info": new_booking_info}
+
+
+# ==================== 路由函数 ====================
+def route_after_agent(state: AgentState) -> Literal["tools", "human_review", "supervisor", "end"]:
+    """子 Agent 执行后，判断是否需要调用工具、人工审核，或返回 Supervisor"""
     messages = state.get("messages", [])
     if not messages:
         return "end"
-
     last_msg = messages[-1]
-
-    # 检查是否是 AIMessage 并且有 tool_calls
     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-        # 如果调用了 submit_bl_draft，进入人工审核
         for tc in last_msg.tool_calls:
             if tc.get("name") == "submit_bl_draft":
                 return "human_review"
         return "tools"
-
+    # 没有工具调用表示任务完成，等待下一轮用户消息
     return "end"
 
-@traceable
+
+def route_after_tools(state: AgentState) -> str:
+    """工具执行后，返回当前活跃的子 Agent 继续处理"""
+    return state.get("active_agent", "supervisor")
+
+
+def route_after_human_review(state: AgentState) -> str:
+    """人工审核后返回 Supervisor"""
+    return "supervisor"
+
+
+# ==================== 构建多 Agent 图 ====================
 def create_agent():
+    """主函数，返回编译后的多 Agent 图（兼容原有调用）"""
     workflow = StateGraph(AgentState)
-    workflow.add_node("agent", agent_node)
-    workflow.add_node("tools", tool_node_with_state_update)
+
+    # 添加节点
+    workflow.add_node("supervisor", supervisor_node)
+    workflow.add_node("query_agent", query_agent_node)
+    workflow.add_node("booking_agent", booking_agent_node)
+    workflow.add_node("compliance_agent", compliance_agent_node)
+    workflow.add_node("notify_agent", notify_agent_node)
+    workflow.add_node("document_agent", document_agent_node)
     workflow.add_node("sensitive_check", sensitive_check_node)
+    workflow.add_node("tools", tool_node_with_state_update)
     workflow.add_node("human_review", human_review_node)
-    workflow.set_entry_point("agent")
-    workflow.add_edge("agent", "sensitive_check")
-    workflow.add_conditional_edges("agent", route_after_agent, {
+
+    # 入口为 Supervisor
+    workflow.set_entry_point("supervisor")
+
+    # Supervisor 动态选择子 Agent
+    workflow.add_conditional_edges(
+        "supervisor",
+        lambda state: state["next_agent"],
+        {
+            "query_agent": "query_agent",
+            "booking_agent": "booking_agent",
+            "compliance_agent": "compliance_agent",
+            "notify_agent": "notify_agent",
+            "document_agent": "document_agent",
+        }
+    )
+
+    # 每个子 Agent 后都执行敏感品检测
+    for agent in ["query_agent", "booking_agent", "compliance_agent", "notify_agent", "document_agent"]:
+        workflow.add_edge(agent, "sensitive_check")
+
+    # 敏感检测后路由
+    workflow.add_conditional_edges("sensitive_check", route_after_agent, {
         "tools": "tools",
         "human_review": "human_review",
+        "supervisor": "supervisor",
         "end": END
     })
-    workflow.add_edge("tools", "agent")       # 工具执行后回到 agent
-    workflow.add_edge("human_review", END)
+
+    # 工具执行后回到当前子 Agent
+    workflow.add_conditional_edges("tools", route_after_tools, {
+        "query_agent": "query_agent",
+        "booking_agent": "booking_agent",
+        "compliance_agent": "compliance_agent",
+        "notify_agent": "notify_agent",
+        "document_agent": "document_agent",
+        "supervisor": "supervisor",
+        "end": END
+    })
+
+    # 人工审核后返回 Supervisor
+    workflow.add_edge("human_review", "supervisor")
+
     return workflow.compile(checkpointer=MemorySaver())
-
-
-import json
-
-@traceable
-def tool_node_with_state_update(state: AgentState):
-    """执行工具并直接更新 booking_info，无需单独的 process_results 节点"""
-    last_msg = state["messages"][-1]
-    tool_calls = last_msg.tool_calls  # 此时 last_msg 一定是 AIMessage
-
-    new_booking_info = state.get("booking_info", {}).copy()
-    results = []
-
-    for tc in tool_calls:
-        tool_name = tc["name"]
-        tool_args = tc["args"]
-        tool_func = tool_map[tool_name]
-
-        raw_result = tool_func.invoke(tool_args)
-        result_data = json.loads(raw_result)
-        results.append(ToolMessage(content=raw_result, tool_call_id=tc["id"]))
-
-        # 直接更新状态
-        if tool_name == "submit_booking" and result_data.get("success"):
-            new_booking_info["booking_no"] = result_data["booking_no"]
-            new_booking_info["so_no"] = result_data["so_no"]
-            new_booking_info.update(tool_args)  # 保存原始参数
-
-    return {"messages": results, "booking_info": new_booking_info}
