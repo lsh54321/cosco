@@ -6,9 +6,9 @@ from paddlex import create_pipeline
 from pydantic import SecretStr
 from pymilvus import MilvusClient, connections, Collection, FieldSchema, DataType, CollectionSchema
 
-from cosco_rag.utils.configManager import get_config
+from cosco_rag.utils.configManager import CONFIG
 
-cfg = get_config()
+cfg = CONFIG
 
 api_url = cfg.get('ocr.api_url')
 model = cfg.get('llm.model')
@@ -115,10 +115,9 @@ SQL：
 
 
 import requests
-import json
 
 
-def generate_sql(user_question, schema_text, model="qwen2.5-72b-instruct"):
+def generate_sql(user_question, schema_text, model="qwen2.5-2b-instruct"):
     prompt = build_sql_prompt(user_question, schema_text)
 
     # 示例使用阿里云 DashScope API（通义千问）

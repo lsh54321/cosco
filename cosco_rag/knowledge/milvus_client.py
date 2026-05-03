@@ -1,4 +1,4 @@
-from pymilvus import connections, Collection, DataType
+from pymilvus import connections, Collection
 from cosco_rag import config
 def get_collection(name: str):
     connections.connect(host=config.MILVUS_HOST, port=config.MILVUS_PORT)

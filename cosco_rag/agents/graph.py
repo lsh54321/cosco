@@ -1,6 +1,9 @@
 import json
+import os
 import re
 from typing import TypedDict, Annotated, List, Literal, Dict, Any
+
+import asyncio
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
@@ -9,6 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, System
 from langsmith import traceable
 
 from cosco_rag import config
+from cosco_rag.interface.multimodal_parser import extract_booking_from_image
 from cosco_rag.tools import tools
 from cosco_rag.knowledge.milvus_client import search_sensitive_goods
 from cosco_rag.utils.logger import get_logger
@@ -139,11 +143,32 @@ notify_agent_node = create_sub_agent_node(
     [],
     system_extra="你负责发送通知、创建待办、提醒用户。直接给出友好的回复。"
 )
-document_agent_node = create_sub_agent_node(
-    "document_agent",
-    [],
-    system_extra="你负责解释文档处理流程。实际上文档解析在系统后台自动完成，回答用户关于托书、图片上传等问题。"
-)
+
+
+@traceable
+def document_agent_node(state: AgentState):
+    """多模态文档解析子 Agent"""
+    # 从用户消息中提取图片路径（假设前端通过 附件字段传递）
+    last_msg = state["messages"][-1]
+    # 实际场景中，图片路径可能存储在 state.uploaded_files 或消息的附件中
+    # 这里简化：假设用户消息中包含 "图片路径: /path/to/tuoshui.jpg"
+    content = last_msg.content
+    image_path = None
+    if "图片路径:" in content:
+        image_path = content.split("图片路径:")[1].strip().split()[0]
+    if not image_path or not os.path.exists(image_path):
+        return {"messages": [AIMessage(content="请上传托书图片。")], "active_agent": "document_agent"}
+    try:
+        parsed = asyncio.run(extract_booking_from_image(image_path))
+        # 将解析结果合并到 booking_info
+        new_booking_info = state.get("booking_info", {}).copy()
+        new_booking_info.update(parsed)
+        success_msg = f"✅ 托书解析成功：发货人 {parsed.get('shipper')}，品名 {parsed.get('goods_name')} 等。"
+        return {"messages": [AIMessage(content=success_msg)], "booking_info": new_booking_info,
+                    "active_agent": "document_agent"}
+    except Exception as e:
+        error_msg = f"❌ 图片解析失败：{str(e)}。请重试或上传更清晰的图片。"
+        return {"messages": [AIMessage(content=error_msg)], "active_agent": "document_agent"}
 
 
 # ==================== Supervisor 节点 ====================
